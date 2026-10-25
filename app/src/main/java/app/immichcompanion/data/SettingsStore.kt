@@ -9,6 +9,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 private val Context.settingsDataStore by preferencesDataStore("settings")
 private val Context.sessionDataStore by preferencesDataStore("session")
@@ -31,6 +33,17 @@ data class BackupSettings(
     val chargingOnly: Boolean = false,
 )
 
+/** The outcome of the last finished backup, kept across app restarts. */
+@Serializable
+data class LastBackup(
+    val finishedAtMs: Long,
+    val uploaded: Int,
+    val duplicates: Int,
+    val failed: Int,
+    val error: String? = null,
+    val needsUser: Boolean = false,
+)
+
 class SettingsStore(private val context: Context) {
     private object Keys {
         val tailscaleEnabled = booleanPreferencesKey("tailscale_enabled")
@@ -39,6 +52,7 @@ class SettingsStore(private val context: Context) {
         val backupAlbums = stringSetPreferencesKey("backup_albums")
         val backupWifiOnly = booleanPreferencesKey("backup_wifi_only")
         val backupChargingOnly = booleanPreferencesKey("backup_charging_only")
+        val lastBackup = stringPreferencesKey("last_backup")
 
         val serverUrl = stringPreferencesKey("server_url")
         val apiBaseUrl = stringPreferencesKey("api_base_url")
@@ -61,6 +75,14 @@ class SettingsStore(private val context: Context) {
             wifiOnly = p[Keys.backupWifiOnly] ?: default.wifiOnly,
             chargingOnly = p[Keys.backupChargingOnly] ?: default.chargingOnly,
         )
+    }
+
+    val lastBackup: Flow<LastBackup?> = context.settingsDataStore.data.map { p ->
+        p[Keys.lastBackup]?.let { runCatching { Json.decodeFromString<LastBackup>(it) }.getOrNull() }
+    }
+
+    suspend fun setLastBackup(last: LastBackup) {
+        context.settingsDataStore.edit { it[Keys.lastBackup] = Json.encodeToString(last) }
     }
 
     val session: Flow<Session?> = context.sessionDataStore.data.map { p ->

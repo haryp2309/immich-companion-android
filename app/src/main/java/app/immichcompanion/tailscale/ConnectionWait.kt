@@ -4,7 +4,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 
-class TailscaleNotConnectedException(message: String) : IOException(message)
+/** [needsUser]: it won't connect until the user signs in or an admin approves the device. */
+class TailscaleNotConnectedException(message: String, val needsUser: Boolean = false) : IOException(message)
 
 /**
  * Polls [status] until the node is Running. Fails right away for states that need
@@ -19,9 +20,10 @@ internal suspend fun awaitRunning(
     var st = status()
     while (!st.isRunning) {
         when (st.state) {
-            "NeedsLogin" -> throw TailscaleNotConnectedException("Tailscale needs you to sign in")
+            "NeedsLogin" -> throw TailscaleNotConnectedException("Tailscale needs you to sign in", needsUser = true)
             "NeedsMachineAuth" -> throw TailscaleNotConnectedException(
                 "This device is waiting for approval in the Tailscale admin console",
+                needsUser = true,
             )
             "Stopped" -> throw TailscaleNotConnectedException(
                 "Tailscale couldn't start" + (st.error?.let { ": $it" } ?: ""),

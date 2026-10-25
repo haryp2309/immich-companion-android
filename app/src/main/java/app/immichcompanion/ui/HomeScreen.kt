@@ -1,6 +1,9 @@
 package app.immichcompanion.ui
 
 import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,7 +18,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,7 +28,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -125,6 +132,10 @@ fun HomeScreen(
                         else -> "Off"
                     },
                 )
+                if (!backupProgress.running) {
+                    backupProgress.finishedAt?.let { InfoRow("Last backup", it.relative()) }
+                    backupProgress.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
                 OutlinedButton(onClick = onOpenBackup) { Text("Manage backup") }
             }
 
@@ -149,27 +160,42 @@ private fun PhotoPickerCard(container: AppContainer) {
     val count by produceState<Int?>(null, syncing) {
         value = withContext(Dispatchers.IO) { container.library.db.count() }
     }
-    // Re-read on every recomposition; the user changes this in the picker.
+    // The user changes the cloud media app in the picker; re-check when coming back.
+    var resumes by remember { mutableIntStateOf(0) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumes++ }
     val resolver = context.contentResolver
+    // Only opened to reach the picker's settings; a picked photo isn't used.
+    val openPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) {}
     val authority = LibrarySync.CLOUD_AUTHORITY
+    val supported = remember(resumes) { MediaStore.isSupportedCloudMediaProviderAuthority(resolver, authority) }
+    val current = remember(resumes) { MediaStore.isCurrentCloudMediaProviderAuthority(resolver, authority) }
     SectionCard("Photo picker") {
         InfoRow("Library", if (syncing) "Syncing…" else count?.let { "$it photos and videos" } ?: "–")
         InfoRow(
             "Cloud media app",
             when {
-                MediaStore.isCurrentCloudMediaProviderAuthority(resolver, authority) -> "Immich"
-                MediaStore.isSupportedCloudMediaProviderAuthority(resolver, authority) -> "Not chosen yet"
+                current -> "Immich"
+                supported -> "Not chosen yet"
                 else -> "Not allowed"
             },
         )
-        if (!MediaStore.isSupportedCloudMediaProviderAuthority(resolver, authority)) {
-            Text(
+        when {
+            !supported -> Text(
                 "Run scripts/enable-cloud-picker.sh with the phone connected over adb, then choose " +
                     "Immich Companion as the cloud media app in the photo picker. Apps that use " +
                     "\"Get content\" can always pick from Immich.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            !current -> {
+                Text(
+                    "In the photo picker, open ⋮ › Cloud media app and choose Immich Companion. " +
+                        "Android resets this choice when the app is updated.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { openPicker.launch(PickVisualMediaRequest()) }) { Text("Open photo picker") }
+            }
         }
         OutlinedButton(onClick = { scope.launch { runCatching { container.library.sync() } } }, enabled = !syncing) {
             Text("Sync now")

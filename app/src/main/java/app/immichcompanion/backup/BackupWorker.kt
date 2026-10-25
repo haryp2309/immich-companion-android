@@ -41,6 +41,9 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             backup.run().also { notifier.cancel() }
         }
         notifications.cancel(NOTIFICATION_ID)
+        val result = backup.progress.value
+        if (result.needsUser) notifications.notify(ATTENTION_ID, attention(result.error ?: "Backup needs your attention"))
+        else notifications.cancel(ATTENTION_ID)
         if (isTrigger) {
             // A content trigger fires once. Retries come from the periodic work.
             backup.rearmTrigger(container.settings.backup.first())
@@ -54,13 +57,28 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     private fun foregroundInfo(p: BackupProgress) =
         ForegroundInfo(NOTIFICATION_ID, notification(p), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
+    private fun openApp() = PendingIntent.getActivity(
+        applicationContext, 0,
+        Intent(applicationContext, MainActivity::class.java),
+        PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    /** Shown when the backup is stuck until the user acts, e.g. the session expired. */
+    private fun attention(message: String): Notification {
+        ensureChannels()
+        return Notification.Builder(applicationContext, ALERT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Backup paused")
+            .setContentText(message)
+            .setStyle(Notification.BigTextStyle().bigText(message))
+            .setContentIntent(openApp())
+            .setAutoCancel(true)
+            .build()
+    }
+
     private fun notification(p: BackupProgress): Notification {
-        ensureChannel()
-        val open = PendingIntent.getActivity(
-            applicationContext, 0,
-            Intent(applicationContext, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
+        ensureChannels()
+        val open = openApp()
         return Notification.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("Backing up to Immich")
@@ -75,12 +93,17 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             .build()
     }
 
-    private fun ensureChannel() {
-        if (notifications.getNotificationChannel(CHANNEL_ID) != null) return
-        notifications.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Backup", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Progress of photo and video backups"
-            },
+    private fun ensureChannels() {
+        if (notifications.getNotificationChannel(ALERT_CHANNEL_ID) != null) return
+        notifications.createNotificationChannels(
+            listOf(
+                NotificationChannel(CHANNEL_ID, "Backup", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Progress of photo and video backups"
+                },
+                NotificationChannel(ALERT_CHANNEL_ID, "Backup problems", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "When backup can't continue without you, e.g. after the Immich session expired"
+                },
+            ),
         )
     }
 
@@ -88,6 +111,8 @@ class BackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val KEY_TRIGGER = "trigger"
         private const val TAG = "BackupWorker"
         private const val CHANNEL_ID = "backup"
+        private const val ALERT_CHANNEL_ID = "backup_alerts"
         private const val NOTIFICATION_ID = 1001
+        private const val ATTENTION_ID = 1002
     }
 }

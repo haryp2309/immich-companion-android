@@ -1,5 +1,6 @@
 package app.immichcompanion.ui
 
+import android.text.format.DateUtils
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -24,6 +25,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.time.Instant
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,4 +69,11 @@ fun Throwable.friendlyMessage(): String = when (this) {
     is IOException if message?.startsWith("Unexpected response code for CONNECT") == true ->
         "Couldn't reach the server over Tailscale"
     else -> message ?: javaClass.simpleName
+}
+
+/** "Just now", "5 minutes ago", "Yesterday", … */
+fun Instant.relative(): String {
+    val now = System.currentTimeMillis()
+    if (now - toEpochMilli() < DateUtils.MINUTE_IN_MILLIS) return "Just now"
+    return DateUtils.getRelativeTimeSpanString(toEpochMilli(), now, DateUtils.MINUTE_IN_MILLIS).toString()
 }

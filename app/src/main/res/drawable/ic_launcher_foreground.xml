@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A photo with an upload arrow. 108dp canvas; the art stays in the central 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Photo frame -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,32h40a6,6 0 0 1 6,6v32a6,6 0 0 1 -6,6h-40a6,6 0 0 1 -6,-6v-32a6,6 0 0 1 6,-6z" />
+    <!-- Mountains -->
+    <path
+        android:fillColor="#3D5AFE"
+        android:pathData="M32,70l14,-17l9,10l6,-6l15,13z" />
+    <!-- Sun -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M64,45m-5,0a5,5 0 1 1 10,0a5,5 0 1 1 -10,0" />
+    <!-- Upload badge -->
+    <path
+        android:fillColor="#00C853"
+        android:pathData="M76,70m-11,0a11,11 0 1 1 22,0a11,11 0 1 1 -22,0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M76,62l-6,7h4v8h4v-8h4z" />
+</vector>

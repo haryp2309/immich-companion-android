@@ -1,19 +1,24 @@
 package app.immichcompanion.backup
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
 import app.immichcompanion.data.BackupSettings
+import app.immichcompanion.data.LastBackup
 import app.immichcompanion.data.SettingsStore
 import app.immichcompanion.immich.BulkUploadCheckItem
 import app.immichcompanion.immich.ImmichApi
 import app.immichcompanion.immich.ImmichApiException
 import app.immichcompanion.immich.UploadMetadata
+import app.immichcompanion.tailscale.TailscaleNotConnectedException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -36,6 +41,8 @@ data class BackupProgress(
     val current: String? = null,
     val finishedAt: Instant? = null,
     val error: String? = null,
+    /** The backup can't continue until the user does something (sign in, grant access). */
+    val needsUser: Boolean = false,
 )
 
 /** How many of the selected files are on the server. */
@@ -47,7 +54,7 @@ enum class BackupOutcome { Done, Retry }
 
 /** Backs up the selected albums to the signed-in Immich account. */
 class BackupManager(
-    context: Context,
+    private val context: Context,
     private val settings: SettingsStore,
     private val api: ImmichApi,
 ) {
@@ -61,7 +68,18 @@ class BackupManager(
     val progress: StateFlow<BackupProgress> = _progress.asStateFlow()
 
     /** Brings the scheduled work in line with the saved settings, without interrupting a running backup. */
-    suspend fun init() = scheduler.apply(settings.backup.first(), replace = false)
+    suspend fun init() {
+        settings.lastBackup.first()?.let { last ->
+            _progress.compareAndSet(
+                BackupProgress(),
+                BackupProgress(
+                    uploaded = last.uploaded, duplicates = last.duplicates, failed = last.failed,
+                    finishedAt = Instant.ofEpochMilli(last.finishedAtMs), error = last.error, needsUser = last.needsUser,
+                ),
+            )
+        }
+        scheduler.apply(settings.backup.first(), replace = false)
+    }
 
     suspend fun updateSettings(backup: BackupSettings) {
         settings.setBackup(backup)
@@ -95,25 +113,39 @@ class BackupManager(
                 backUp()
                 BackupOutcome.Done
             } catch (e: ImmichApiException) {
-                fail(if (e.code == 401) "Your Immich session expired. Sign in again." else e.message)
+                if (e.code == 401) fail("Your Immich session expired. Sign in again.", needsUser = true)
+                else fail(e.message)
                 if (e.code >= 500) BackupOutcome.Retry else BackupOutcome.Done
+            } catch (e: TailscaleNotConnectedException) {
+                fail(e.message, needsUser = e.needsUser)
+                // Retrying soon won't help when it's waiting for the user; the periodic run checks again.
+                if (e.needsUser) BackupOutcome.Done else BackupOutcome.Retry
             } catch (e: IOException) {
                 Log.w(TAG, "backup stopped", e)
                 fail(e.message ?: "Network error")
                 BackupOutcome.Retry
             } catch (e: SecurityException) {
-                fail("No permission to read photos and videos")
+                fail("Allow access to photos and videos to back them up", needsUser = true)
                 BackupOutcome.Done
             }
-            _progress.update { it.copy(running = false, current = null, finishedAt = Instant.now()) }
+            val done = _progress.updateAndGet { it.copy(running = false, current = null, finishedAt = Instant.now()) }
+            settings.setLastBackup(
+                LastBackup(
+                    done.finishedAt!!.toEpochMilli(), done.uploaded, done.duplicates, done.failed,
+                    done.error, done.needsUser,
+                ),
+            )
             outcome
         }
     }
 
-    private fun fail(message: String?) = _progress.update { it.copy(error = message ?: "Backup failed") }
+    private fun fail(message: String?, needsUser: Boolean = false) =
+        _progress.update { it.copy(error = message ?: "Backup failed", needsUser = needsUser) }
 
     private suspend fun backUp() {
-        val session = settings.currentSession() ?: return fail("Sign in to Immich to back up")
+        val session = settings.currentSession() ?: return fail("Sign in to Immich to back up", needsUser = true)
+        // Without access MediaStore just returns nothing, which would look like a finished backup.
+        if (!hasMediaAccess()) return fail("Allow access to photos and videos to back them up", needsUser = true)
         val backup = settings.backup.first()
         val apiUrl = session.apiBaseUrl.toHttpUrl()
         val account = accountKey(session.apiBaseUrl, session.userEmail)
@@ -204,6 +236,12 @@ class BackupManager(
         Log.w(TAG, "couldn't read ${media.name}", e)
         _progress.update { it.copy(processed = it.processed + 1, failed = it.failed + 1) }
     }
+
+    private fun hasMediaAccess() = listOf(
+        Manifest.permission.READ_MEDIA_IMAGES,
+        Manifest.permission.READ_MEDIA_VIDEO,
+        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+    ).any { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 
     private fun accountKey(apiBaseUrl: String, email: String) = "$apiBaseUrl|$email"
 

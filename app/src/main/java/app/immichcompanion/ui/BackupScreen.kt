@@ -171,7 +171,8 @@ fun BackupScreen(container: AppContainer, onBack: () -> Unit) {
                     }
                 } else if (progress.finishedAt != null) {
                     val p = progress
-                    InfoRow("Last run", "${p.uploaded} uploaded · ${p.duplicates} already there · ${p.failed} failed")
+                    InfoRow("Last run", p.finishedAt!!.relative())
+                    InfoRow("Result", "${p.uploaded} uploaded · ${p.duplicates} already there · ${p.failed} failed")
                 }
                 progress.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 OutlinedButton(
