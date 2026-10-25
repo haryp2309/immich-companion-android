@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/envknob"
 	"tailscale.com/net/netmon"
 	"tailscale.com/tsnet"
 )
@@ -49,6 +50,9 @@ func Start(stateDir, hostname, authKey string) error {
 	// Android apps have no HOME/TMPDIR; some Tailscale code paths expect them.
 	os.Setenv("HOME", stateDir)
 	os.Setenv("TMPDIR", stateDir)
+	// Log uploads to log.tailscale.com can't resolve on Android (no resolv.conf for
+	// Go) and aren't needed for a personal app.
+	envknob.SetNoLogsNoSupport()
 
 	s := &tsnet.Server{
 		Dir:      stateDir,
@@ -194,6 +198,21 @@ func SetInterfaces(desc string) {
 	netmon.RegisterInterfaceGetter(func() ([]netmon.Interface, error) {
 		return ifaces, nil
 	})
+	networkChanged()
+}
+
+// networkChanged tells the running node to re-check the network right away.
+// On Android, netmon otherwise only polls every 10 minutes.
+func networkChanged() {
+	mu.Lock()
+	s := srv
+	mu.Unlock()
+	if s == nil {
+		return
+	}
+	if nm, ok := s.Sys().NetMon.GetOK(); ok {
+		nm.InjectEvent()
+	}
 }
 
 func parseInterfaces(desc string) []netmon.Interface {
@@ -269,7 +288,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Rewrite:       func(pr *httputil.ProxyRequest) { pr.Out.URL = pr.In.URL },
 			FlushInterval: -1,
 			Transport: &http.Transport{
-				DialContext:           h.s.Dial,
+				DialContext:           h.dial,
 				MaxIdleConnsPerHost:   4,
 				IdleConnTimeout:       90 * time.Second,
 				ResponseHeaderTimeout: 10 * time.Minute,
@@ -279,10 +298,42 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.rp.ServeHTTP(w, r)
 }
 
-func (h *proxyHandler) connect(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+// dial connects through the tailnet, retrying with short attempts until ctx
+// expires. Right after start the node runs on a cached netmap without peers,
+// and a TCP dial started then doesn't recover once the peers arrive, so a
+// fresh attempt is what gets through. This also covers network switches.
+func (h *proxyHandler) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	upstream, err := h.s.Dial(ctx, "tcp", r.Host)
+	return dialRetry(ctx, network, addr, h.s.Dial)
+}
+
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+var (
+	dialAttemptTimeout = 4 * time.Second
+	dialRetryPause     = 250 * time.Millisecond
+)
+
+func dialRetry(ctx context.Context, network, addr string, dial dialFunc) (net.Conn, error) {
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, dialAttemptTimeout)
+		c, err := dial(attemptCtx, network, addr)
+		cancel()
+		if err == nil {
+			return c, nil
+		}
+		select {
+		case <-ctx.Done():
+			log.Printf("proxy: dial %s: %v", addr, err)
+			return nil, err
+		case <-time.After(dialRetryPause):
+		}
+	}
+}
+
+func (h *proxyHandler) connect(w http.ResponseWriter, r *http.Request) {
+	upstream, err := h.dial(r.Context(), "tcp", r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

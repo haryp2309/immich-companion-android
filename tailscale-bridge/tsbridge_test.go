@@ -1,9 +1,13 @@
 package tsbridge
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestParseInterfaces(t *testing.T) {
@@ -55,5 +59,46 @@ func TestProxyRequiresToken(t *testing.T) {
 	}
 	if r.Header.Get("Proxy-Authorization") != "" {
 		t.Errorf("Proxy-Authorization should be stripped before forwarding")
+	}
+}
+
+func TestDialRetryGetsThroughAfterFailures(t *testing.T) {
+	defer func(a, p time.Duration) { dialAttemptTimeout, dialRetryPause = a, p }(dialAttemptTimeout, dialRetryPause)
+	dialAttemptTimeout, dialRetryPause = 50*time.Millisecond, time.Millisecond
+
+	attempts := 0
+	fake := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		attempts++
+		if attempts < 3 {
+			<-ctx.Done() // simulate a dial that hangs until the attempt times out
+			return nil, ctx.Err()
+		}
+		c, _ := net.Pipe()
+		return c, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, err := dialRetry(ctx, "tcp", "immich:443", fake)
+	if err != nil || c == nil || attempts != 3 {
+		t.Fatalf("got conn=%v err=%v attempts=%d, want success on attempt 3", c, err, attempts)
+	}
+	c.Close()
+}
+
+func TestDialRetryGivesUpWhenContextEnds(t *testing.T) {
+	defer func(a, p time.Duration) { dialAttemptTimeout, dialRetryPause = a, p }(dialAttemptTimeout, dialRetryPause)
+	dialAttemptTimeout, dialRetryPause = 20*time.Millisecond, time.Millisecond
+
+	fail := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("no route")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := dialRetry(ctx, "tcp", "immich:443", fail); err == nil {
+		t.Fatal("expected an error")
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Fatalf("took %v, should stop when the context ends", d)
 	}
 }

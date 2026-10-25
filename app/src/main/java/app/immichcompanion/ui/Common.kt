@@ -19,7 +19,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import app.immichcompanion.immich.ImmichApiException
-import app.immichcompanion.net.TailscaleNotConnectedException
+import app.immichcompanion.tailscale.TailscaleNotConnectedException
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -57,10 +58,13 @@ fun InfoRow(label: String, value: String) {
 
 /** Short, human-readable text for errors from the network stack and the Immich API. */
 fun Throwable.friendlyMessage(): String = when (this) {
-    is TailscaleNotConnectedException -> "Tailscale is turned on but not connected yet"
+    is TailscaleNotConnectedException -> message!!
     is ImmichApiException -> if (code == 401) "Wrong email or password" else (message ?: "Server error $code")
     is UnknownHostException -> "Couldn't find that server. Check the address or your Tailscale connection."
     is ConnectException -> "Couldn't connect to the server"
     is SocketTimeoutException -> "The server took too long to respond"
+    // The tailnet proxy answers 502 when it can't reach the server through Tailscale.
+    is IOException if message?.startsWith("Unexpected response code for CONNECT") == true ->
+        "Couldn't reach the server over Tailscale"
     else -> message ?: javaClass.simpleName
 }

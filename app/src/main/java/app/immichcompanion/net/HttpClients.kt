@@ -1,6 +1,7 @@
 package app.immichcompanion.net
 
 import app.immichcompanion.tailscale.TailscaleManager
+import kotlinx.coroutines.runBlocking
 import okhttp3.Authenticator
 import okhttp3.Credentials
 import okhttp3.Interceptor
@@ -13,8 +14,6 @@ import java.net.ProxySelector
 import java.net.SocketAddress
 import java.net.URI
 import java.util.concurrent.TimeUnit
-
-class TailscaleNotConnectedException : IOException("Tailscale is enabled but not connected")
 
 /**
  * Builds the single OkHttpClient used for all Immich traffic. When Tailscale is
@@ -29,9 +28,10 @@ object HttpClients {
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .proxySelector(TailnetProxySelector(tailscale))
-        // Fail instead of silently going direct when the user expects the tailnet.
+        // Wait for the node when it's still connecting (e.g. right after the process started),
+        // and never silently go direct when the user expects the tailnet.
         .addInterceptor { chain ->
-            if (tailscale.enabled.value && tailscale.proxy == null) throw TailscaleNotConnectedException()
+            if (tailscale.enabled.value) runBlocking { tailscale.awaitProxy() }
             chain.proceed(chain.request())
         }
         // HTTPS goes through a CONNECT tunnel; OkHttp asks for the credentials up front.
