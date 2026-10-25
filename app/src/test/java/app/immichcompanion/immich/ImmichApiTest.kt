@@ -125,4 +125,27 @@ class ImmichApiTest {
         assertEquals("/api/assets/bulk-upload-check", req.url.encodedPath)
         assertEquals("""{"assets":[{"id":"1","checksum":"c1"},{"id":"2","checksum":"c2"}]}""", req.body!!.utf8())
     }
+
+    @Test fun syncStreamParsesLinesAndAcks() = runTest {
+        route {
+            when (it.url.encodedPath) {
+                "/api/sync/stream" -> MockResponse.Builder().code(200)
+                    .addHeader("Content-Type", "application/jsonlines+json")
+                    .body(
+                        """{"type":"AssetDeleteV1","data":{"assetId":"a1"},"ack":"AssetDeleteV1|u1"}""" + "\n" +
+                            """{"type":"SyncCompleteV1","data":{},"ack":"SyncCompleteV1|u2"}""" + "\n",
+                    )
+                    .build()
+                else -> MockResponse.Builder().code(204).build()
+            }
+        }
+        val lines = mutableListOf<SyncLine>()
+        api.syncStream(server.url("/api"), "tok", listOf("AssetsV2"), reset = true) { lines += it }
+        assertEquals(listOf("AssetDeleteV1", "SyncCompleteV1"), lines.map { it.type })
+        assertEquals("SyncCompleteV1|u2", lines[1].ack)
+        assertEquals("""{"types":["AssetsV2"],"reset":true}""", server.takeRequest().body!!.utf8())
+
+        api.syncAck(server.url("/api"), "tok", listOf("AssetDeleteV1|u1"))
+        assertEquals("""{"acks":["AssetDeleteV1|u1"]}""", server.takeRequest().body!!.utf8())
+    }
 }

@@ -68,6 +68,14 @@ class BackupDb(context: Context) : SQLiteOpenHelper(context, "backup.db", null, 
         return out
     }
 
+    /** Local MediaStore IDs by Immich asset ID, for files this app uploaded. */
+    fun uploaded(account: String): Map<String, Long> = readableDatabase.query(
+        "assets", arrayOf("remote_id", "media_id"),
+        "account = ? AND remote_id IS NOT NULL", arrayOf(account), null, null, null,
+    ).use { c ->
+        buildMap { while (c.moveToNext()) put(c.getString(0), c.getLong(1)) }
+    }
+
     fun save(account: String, record: BackupRecord) {
         val values = ContentValues().apply {
             put("account", account)

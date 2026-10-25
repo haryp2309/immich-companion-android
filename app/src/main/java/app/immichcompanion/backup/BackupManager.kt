@@ -81,6 +81,12 @@ class BackupManager(
         BackupSummary(media.size, media.count { records[it.id]?.isDone(it) == true })
     }
 
+    /** Local MediaStore IDs of backed-up files, by Immich asset ID. */
+    suspend fun localIdsByAssetId(): Map<String, Long> = withContext(Dispatchers.IO) {
+        val session = settings.currentSession() ?: return@withContext emptyMap()
+        db.uploaded(accountKey(session.apiBaseUrl, session.userEmail))
+    }
+
     /** Runs one backup. Concurrent calls wait for each other, so a file is never uploaded twice. */
     suspend fun run(): BackupOutcome = runLock.withLock {
         withContext(Dispatchers.IO) {

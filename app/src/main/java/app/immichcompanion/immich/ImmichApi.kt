@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -16,6 +17,9 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.buffer
+import okio.sink
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
@@ -89,6 +93,16 @@ data class UploadMetadata(
 )
 
 @Serializable
+private data class SyncStreamRequest(val types: List<String>, val reset: Boolean)
+
+/** One line of `/sync/stream`. [ack] is sent back once the change is stored. */
+@Serializable
+data class SyncLine(val type: String, val data: JsonObject, val ack: String)
+
+@Serializable
+private data class SyncAckRequest(val acks: List<String>)
+
+@Serializable
 private data class ErrorBody(val message: String? = null)
 
 class ImmichApiException(val code: Int, message: String) : IOException(message)
@@ -100,6 +114,9 @@ class ImmichApi(private val client: OkHttpClient) {
 
     // The server answers an upload only after it has stored the whole file.
     private val uploadClient = client.newBuilder().readTimeout(5, TimeUnit.MINUTES).build()
+
+    // Sync streams and downloads can be large; only stalls should time out.
+    private val streamClient = client.newBuilder().readTimeout(2, TimeUnit.MINUTES).build()
 
     /**
      * Finds the API root for a server URL. It reads `/.well-known/immich` like the
@@ -167,12 +184,63 @@ class ImmichApi(private val client: OkHttpClient) {
     private suspend inline fun <reified T> post(url: HttpUrl, body: String, token: String?): T =
         json.decodeFromString(execute(Request.Builder().url(url).post(body.toRequestBody(jsonType)), token))
 
+    /**
+     * Streams `/sync/stream` (JSON lines) and hands each line to [onLine]. Only the
+     * user's own entities of [types] are sent; acked changes aren't sent again.
+     */
+    suspend fun syncStream(
+        api: HttpUrl,
+        token: String,
+        types: List<String>,
+        reset: Boolean,
+        onLine: suspend (SyncLine) -> Unit,
+    ) {
+        val body = json.encodeToString(SyncStreamRequest(types, reset)).toRequestBody(jsonType)
+        open(Request.Builder().url(api.child("sync/stream")).post(body), token, streamClient, accept = "*/*").use { resp ->
+            val source = resp.body.source()
+            while (true) {
+                val line = withContext(Dispatchers.IO) { source.readUtf8Line() } ?: break
+                if (line.isNotBlank()) onLine(json.decodeFromString(line))
+            }
+        }
+    }
+
+    /** Tells the server which sync changes are stored, so the next stream continues after them. */
+    suspend fun syncAck(api: HttpUrl, token: String, acks: List<String>) {
+        val body = json.encodeToString(SyncAckRequest(acks)).toRequestBody(jsonType)
+        execute(Request.Builder().url(api.child("sync/ack")).post(body), token)
+    }
+
+    /** Downloads an asset's thumbnail (`thumbnail` ~250 px WebP, `preview` ~1440 px JPEG) to [dest]. */
+    suspend fun downloadThumbnail(api: HttpUrl, token: String, assetId: String, size: String, dest: File) =
+        download(api.child("assets/$assetId/thumbnail").newBuilder().addQueryParameter("size", size).build(), token, dest)
+
+    /** Downloads the original file of an asset to [dest]. */
+    suspend fun downloadOriginal(api: HttpUrl, token: String, assetId: String, dest: File) =
+        download(api.child("assets/$assetId/original"), token, dest)
+
+    private suspend fun download(url: HttpUrl, token: String, dest: File) {
+        open(Request.Builder().url(url).get(), token, streamClient, accept = "*/*").use { resp ->
+            withContext(Dispatchers.IO) {
+                dest.sink().buffer().use { it.writeAll(resp.body.source()) }
+            }
+        }
+    }
+
     private suspend fun execute(
         builder: Request.Builder,
         token: String?,
         client: OkHttpClient = this.client,
-    ): String {
-        builder.header("Accept", "application/json")
+    ): String = open(builder, token, client).use { withContext(Dispatchers.IO) { it.body.string() } }
+
+    /** Sends the request and returns the successful response; the caller closes it. */
+    private suspend fun open(
+        builder: Request.Builder,
+        token: String?,
+        client: OkHttpClient,
+        accept: String = "application/json",
+    ): Response {
+        builder.header("Accept", accept)
         if (token != null) builder.header("Authorization", "Bearer $token")
         val call = client.newCall(builder.build())
         // Async, so cancelling the coroutine (e.g. a stopped backup) also stops the request.
@@ -184,16 +252,12 @@ class ImmichApi(private val client: OkHttpClient) {
                     cont.resume(response) { _, r, _ -> r.close() }
             })
         }
-        return withContext(Dispatchers.IO) {
-            resp.use {
-                val body = it.body.string()
-                if (!it.isSuccessful) {
-                    val msg = runCatching { json.decodeFromString<ErrorBody>(body).message }.getOrNull()
-                    throw ImmichApiException(it.code, msg ?: "HTTP ${it.code}")
-                }
-                body
-            }
+        if (!resp.isSuccessful) {
+            val body = resp.use { withContext(Dispatchers.IO) { it.body.string() } }
+            val msg = runCatching { json.decodeFromString<ErrorBody>(body).message }.getOrNull()
+            throw ImmichApiException(resp.code, msg ?: "HTTP ${resp.code}")
         }
+        return resp
     }
 
     private fun HttpUrl.child(path: String): HttpUrl = newBuilder().addPathSegments(path).build()

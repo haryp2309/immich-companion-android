@@ -34,6 +34,37 @@
             </intent-filter>
         </activity>
 
+        <!-- Immich as a cloud media source of the system photo picker. -->
+        <provider
+            android:name=".picker.ImmichCloudMediaProvider"
+            android:authorities="app.immichcompanion.cloudpicker"
+            android:exported="true"
+            android:permission="com.android.providers.media.permission.MANAGE_CLOUD_MEDIA_PROVIDERS">
+            <intent-filter>
+                <action android:name="android.content.action.CLOUD_MEDIA_PROVIDER" />
+            </intent-filter>
+        </provider>
+
+        <!-- Fallback picker for ACTION_GET_CONTENT, and the files it hands out. -->
+        <activity
+            android:name=".picker.PickerActivity"
+            android:exported="true"
+            android:label="Immich">
+            <intent-filter>
+                <action android:name="android.intent.action.GET_CONTENT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.OPENABLE" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name=".picker.AssetContentProvider"
+            android:authorities="app.immichcompanion.assets"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <!-- WorkManager runs long backups in its foreground service. -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

@@ -1,5 +1,6 @@
 package app.immichcompanion.ui
 
+import android.provider.MediaStore
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,10 +15,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -25,7 +29,10 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.immichcompanion.AppContainer
 import app.immichcompanion.immich.ConnectionCheck
+import app.immichcompanion.library.LibrarySync
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class HomeViewModel(private val container: AppContainer) : ViewModel() {
     var check by mutableStateOf<ConnectionCheck?>(null)
@@ -120,6 +127,8 @@ fun HomeScreen(
                 )
                 OutlinedButton(onClick = onOpenBackup) { Text("Manage backup") }
             }
+
+            PhotoPickerCard(container)
         }
     }
 }
@@ -130,4 +139,40 @@ fun String.toDisplayState(): String = when (this) {
     "NeedsMachineAuth" -> "Waiting for admin approval"
     "Starting", "NoState" -> "Connecting…"
     else -> this
+}
+
+@Composable
+private fun PhotoPickerCard(container: AppContainer) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val syncing by container.library.syncing.collectAsStateWithLifecycle()
+    val count by produceState<Int?>(null, syncing) {
+        value = withContext(Dispatchers.IO) { container.library.db.count() }
+    }
+    // Re-read on every recomposition; the user changes this in the picker.
+    val resolver = context.contentResolver
+    val authority = LibrarySync.CLOUD_AUTHORITY
+    SectionCard("Photo picker") {
+        InfoRow("Library", if (syncing) "Syncing…" else count?.let { "$it photos and videos" } ?: "–")
+        InfoRow(
+            "Cloud media app",
+            when {
+                MediaStore.isCurrentCloudMediaProviderAuthority(resolver, authority) -> "Immich"
+                MediaStore.isSupportedCloudMediaProviderAuthority(resolver, authority) -> "Not chosen yet"
+                else -> "Not allowed"
+            },
+        )
+        if (!MediaStore.isSupportedCloudMediaProviderAuthority(resolver, authority)) {
+            Text(
+                "Run scripts/enable-cloud-picker.sh with the phone connected over adb, then choose " +
+                    "Immich Companion as the cloud media app in the photo picker. Apps that use " +
+                    "\"Get content\" can always pick from Immich.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedButton(onClick = { scope.launch { runCatching { container.library.sync() } } }, enabled = !syncing) {
+            Text("Sync now")
+        }
+    }
 }
