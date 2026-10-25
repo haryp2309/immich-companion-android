@@ -13,7 +13,8 @@ if [[ -z "${JAVA_HOME:-}" && -d "/Applications/Android Studio.app/Contents/jbr/C
 fi
 export PATH="${JAVA_HOME:+$JAVA_HOME/bin:}$(go env GOPATH)/bin:$PATH"
 
-command -v gomobile >/dev/null || go install golang.org/x/mobile/cmd/gomobile@latest golang.org/x/mobile/cmd/gobind@latest
+# The golang.org/x/mobile version pinned in go.mod (gomobile and gobind must match it).
+command -v gomobile >/dev/null || go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
 
 mkdir -p ../app/libs
 gomobile bind \
