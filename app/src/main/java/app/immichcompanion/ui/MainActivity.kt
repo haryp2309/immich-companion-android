@@ -24,10 +24,14 @@ class MainActivity : ComponentActivity() {
                             container = container,
                             onOpenTailscale = { nav.navigate("tailscale") },
                             onSignIn = { nav.navigate("login") },
+                            onOpenBackup = { nav.navigate("backup") },
                         )
                     }
                     composable("login") {
                         LoginScreen(container = container, onBack = { nav.popBackStack() }, onSignedIn = { nav.popBackStack() })
+                    }
+                    composable("backup") {
+                        BackupScreen(container = container, onBack = { nav.popBackStack() })
                     }
                     composable("tailscale") {
                         TailscaleScreen(container = container, onBack = { nav.popBackStack() })

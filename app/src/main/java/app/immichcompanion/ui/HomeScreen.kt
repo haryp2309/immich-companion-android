@@ -56,11 +56,18 @@ class HomeViewModel(private val container: AppContainer) : ViewModel() {
 }
 
 @Composable
-fun HomeScreen(container: AppContainer, onOpenTailscale: () -> Unit, onSignIn: () -> Unit) {
+fun HomeScreen(
+    container: AppContainer,
+    onOpenTailscale: () -> Unit,
+    onSignIn: () -> Unit,
+    onOpenBackup: () -> Unit,
+) {
     val vm = viewModel { HomeViewModel(container) }
     val session by container.settings.session.collectAsStateWithLifecycle(initialValue = null)
     val tsEnabled by container.tailscale.enabled.collectAsStateWithLifecycle()
     val tsStatus by container.tailscale.status.collectAsStateWithLifecycle()
+    val backup by container.settings.backup.collectAsStateWithLifecycle(initialValue = null)
+    val backupProgress by container.backup.progress.collectAsStateWithLifecycle()
 
     // Re-check whenever the account or the route to the server changes.
     LaunchedEffect(session?.apiBaseUrl, tsEnabled, tsStatus.isRunning) {
@@ -100,6 +107,18 @@ fun HomeScreen(container: AppContainer, onOpenTailscale: () -> Unit, onSignIn: (
                         OutlinedButton(onClick = vm::signOut) { Text("Sign out") }
                     }
                 }
+            }
+
+            SectionCard("Backup") {
+                InfoRow(
+                    "Automatic backup",
+                    when {
+                        backupProgress.running -> "Backing up ${backupProgress.processed} of ${backupProgress.total}"
+                        backup?.enabled == true -> "On"
+                        else -> "Off"
+                    },
+                )
+                OutlinedButton(onClick = onOpenBackup) { Text("Manage backup") }
             }
         }
     }

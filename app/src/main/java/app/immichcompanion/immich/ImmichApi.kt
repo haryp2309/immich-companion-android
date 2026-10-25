@@ -1,16 +1,24 @@
 package app.immichcompanion.immich
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resumeWithException
 
 @Serializable
 data class LoginRequest(val email: String, val password: String)
@@ -42,6 +50,45 @@ private data class WellKnown(val api: Api) {
 }
 
 @Serializable
+data class BulkUploadCheckItem(val id: String, val checksum: String)
+
+@Serializable
+private data class BulkUploadCheckRequest(val assets: List<BulkUploadCheckItem>)
+
+@Serializable
+data class BulkUploadCheckResult(
+    val id: String,
+    /** accept or reject. */
+    val action: String,
+    /** duplicate or unsupported-format, when rejected. */
+    val reason: String? = null,
+    val assetId: String? = null,
+    val isTrashed: Boolean = false,
+)
+
+@Serializable
+private data class BulkUploadCheckResponse(val results: List<BulkUploadCheckResult>)
+
+@Serializable
+data class UploadResponse(
+    val id: String,
+    /** created or duplicate. */
+    val status: String,
+)
+
+/** Metadata Immich stores with an uploaded file. Times are ISO-8601 instants. */
+data class UploadMetadata(
+    val filename: String,
+    val fileCreatedAt: String,
+    val fileModifiedAt: String,
+    val isFavorite: Boolean = false,
+    /** Video length in milliseconds. */
+    val durationMs: Long? = null,
+    /** Base64 or hex SHA-1, lets the server skip a file it already has. */
+    val checksum: String? = null,
+)
+
+@Serializable
 private data class ErrorBody(val message: String? = null)
 
 class ImmichApiException(val code: Int, message: String) : IOException(message)
@@ -50,6 +97,9 @@ class ImmichApiException(val code: Int, message: String) : IOException(message)
 class ImmichApi(private val client: OkHttpClient) {
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonType = "application/json".toMediaType()
+
+    // The server answers an upload only after it has stored the whole file.
+    private val uploadClient = client.newBuilder().readTimeout(5, TimeUnit.MINUTES).build()
 
     /**
      * Finds the API root for a server URL. It reads `/.well-known/immich` like the
@@ -88,22 +138,61 @@ class ImmichApi(private val client: OkHttpClient) {
         execute(Request.Builder().url(api.child("auth/logout")).post(ByteArray(0).toRequestBody()), token)
     }
 
+    /** Asks which of the files (by SHA-1) the server already has. */
+    suspend fun bulkUploadCheck(api: HttpUrl, token: String, items: List<BulkUploadCheckItem>): List<BulkUploadCheckResult> =
+        post<BulkUploadCheckResponse>(
+            api.child("assets/bulk-upload-check"),
+            json.encodeToString(BulkUploadCheckRequest(items)),
+            token,
+        ).results
+
+    /** Uploads one file. [data] is streamed, so it can be any size. */
+    suspend fun upload(api: HttpUrl, token: String, meta: UploadMetadata, data: RequestBody): UploadResponse {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("fileCreatedAt", meta.fileCreatedAt)
+            .addFormDataPart("fileModifiedAt", meta.fileModifiedAt)
+            .addFormDataPart("filename", meta.filename)
+            .addFormDataPart("isFavorite", meta.isFavorite.toString())
+            .apply { meta.durationMs?.let { addFormDataPart("duration", it.toString()) } }
+            .addFormDataPart("assetData", meta.filename, data)
+            .build()
+        val builder = Request.Builder().url(api.child("assets")).post(body)
+        meta.checksum?.let { builder.header("x-immich-checksum", it) }
+        return json.decodeFromString(execute(builder, token, uploadClient))
+    }
+
     private suspend inline fun <reified T> get(url: HttpUrl, token: String?): T =
         json.decodeFromString(execute(Request.Builder().url(url).get(), token))
 
     private suspend inline fun <reified T> post(url: HttpUrl, body: String, token: String?): T =
         json.decodeFromString(execute(Request.Builder().url(url).post(body.toRequestBody(jsonType)), token))
 
-    private suspend fun execute(builder: Request.Builder, token: String?): String = withContext(Dispatchers.IO) {
+    private suspend fun execute(
+        builder: Request.Builder,
+        token: String?,
+        client: OkHttpClient = this.client,
+    ): String {
         builder.header("Accept", "application/json")
         if (token != null) builder.header("Authorization", "Bearer $token")
-        client.newCall(builder.build()).execute().use { resp ->
-            val body = resp.body.string()
-            if (!resp.isSuccessful) {
-                val msg = runCatching { json.decodeFromString<ErrorBody>(body).message }.getOrNull()
-                throw ImmichApiException(resp.code, msg ?: "HTTP ${resp.code}")
+        val call = client.newCall(builder.build())
+        // Async, so cancelling the coroutine (e.g. a stopped backup) also stops the request.
+        val resp = suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) = cont.resumeWithException(e)
+                override fun onResponse(call: Call, response: Response) =
+                    cont.resume(response) { _, r, _ -> r.close() }
+            })
+        }
+        return withContext(Dispatchers.IO) {
+            resp.use {
+                val body = it.body.string()
+                if (!it.isSuccessful) {
+                    val msg = runCatching { json.decodeFromString<ErrorBody>(body).message }.getOrNull()
+                    throw ImmichApiException(it.code, msg ?: "HTTP ${it.code}")
+                }
+                body
             }
-            body
         }
     }
 
